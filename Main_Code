@@ -1,0 +1,82 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// Time tracking
+unsigned long startTime;
+
+void drawBatteryIcon(int x, int y, int width, int height, int percentage) {
+  // Draw outer battery body
+  display.drawRect(x, y, width, height, WHITE);
+
+  // Draw battery terminal
+  int terminalWidth = 2;
+  int terminalHeight = height / 2;
+  display.drawRect(x + width, y + (height - terminalHeight) / 2, terminalWidth, terminalHeight, WHITE);
+
+  // Fill level (based on percentage)
+  int innerPadding = 1;
+  int fillWidth = (percentage * (width - 2 * innerPadding)) / 100;
+  display.fillRect(x + innerPadding, y + innerPadding, fillWidth, height - 2 * innerPadding, WHITE);
+}
+
+void drawRuntime(int x, int y, unsigned long elapsedMillis) {
+  int totalMinutes = elapsedMillis / 60000;
+  int hours = totalMinutes / 60;
+  int minutes = totalMinutes % 60;
+
+  // Format time as HH:MM
+  char buffer[6];
+  snprintf(buffer, sizeof(buffer), "%02d:%02d", hours, minutes);
+
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(x, y);
+  display.print(buffer);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for (;;);
+  }
+
+  startTime = millis();
+}
+
+void loop() {
+  display.clearDisplay();
+
+  // Draw Hello world
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  // display.setCursor(0, 20);
+  // display.println("Hello, world!");
+
+  // Battery info
+  int batteryPercentage = 75; // Replace with actual sensor reading later
+  int batteryWidth = 16;
+  int batteryHeight = 8;
+  int x = SCREEN_WIDTH - batteryWidth - 4;
+  int y = 2;
+
+  drawBatteryIcon(x, y, batteryWidth, batteryHeight, batteryPercentage);
+
+  // Runtime
+  drawRuntime(0, 2, millis() - startTime);
+  
+  // Draw dotted line across entire width to simulate grey line
+for (int i = 0; i < SCREEN_WIDTH; i += 1) {
+  display.drawPixel(i, 15, WHITE);  // Y=18 is below time and battery
+}
+
+  display.display();
+  delay(1000); // Update every second
+}
