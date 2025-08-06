@@ -1,36 +1,58 @@
+#include "icons.h"
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-
+#include <math.h>
+#include <Fonts/Orbitron_Medium_18.h>   // Your custom font
+// #include <U8g2lib.h>
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 
+int xPos = 70;   // X-axis position Degree (you can change this )
+int yPos = 17;   // Y-axis position Degree (you can change this)
+int xPos2 = 74;   // X-axis position Degree (you can change this )
+int yPos2 = 43;   // Y-axis position Degree (you can change this)
+
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// New global variables for timing
+unsigned long lastTempUpdate = 0;
+const unsigned long tempUpdateInterval = 5000;  // 5 seconds
 
 // Time tracking
 unsigned long startTime;
 
-void drawBatteryIcon(int x, int y, int width, int height, int percentage) {
-  // Draw outer battery body
-  display.drawRect(x, y, width, height, WHITE);
+// --- NTC Thermistor Configuration ---
+const int ntcPin = 0;            // ADC1 channel (GPIO0)
+const float Vcc = 3.3;
+const int adcMax = 4095;
+const float R_fixed = 100000.0;  // 100kΩ
+const float beta = 3950.0;
+const float T0 = 298.15;         // 25°C in Kelvin
+const float R0 = 100000.0;       // NTC resistance at 25°C
+const float calibrationOffset = -5;
 
-  // Draw battery terminal
+// Store last displayed temperature
+int lastTempF = -1000;  // Unlikely starting value
+
+// --- Function to draw battery ---
+void drawBatteryIcon(int x, int y, int width, int height, int percentage) {
+  display.drawRect(x, y, width, height, WHITE);
   int terminalWidth = 2;
   int terminalHeight = height / 2;
   display.drawRect(x + width, y + (height - terminalHeight) / 2, terminalWidth, terminalHeight, WHITE);
 
-  // Fill level (based on percentage)
   int innerPadding = 1;
   int fillWidth = (percentage * (width - 2 * innerPadding)) / 100;
   display.fillRect(x + innerPadding, y + innerPadding, fillWidth, height - 2 * innerPadding, WHITE);
 }
 
+// --- Function to draw runtime (HH:MM) ---
 void drawRuntime(int x, int y, unsigned long elapsedMillis) {
   int totalMinutes = elapsedMillis / 60000;
   int hours = totalMinutes / 60;
   int minutes = totalMinutes % 60;
 
-  // Format time as HH:MM
   char buffer[6];
   snprintf(buffer, sizeof(buffer), "%02d:%02d", hours, minutes);
 
@@ -40,43 +62,164 @@ void drawRuntime(int x, int y, unsigned long elapsedMillis) {
   display.print(buffer);
 }
 
+// --- Function to read temperature (Fahrenheit) ---
+int readTemperatureF() {
+  const int samples = 5;
+  float total = 0;
+
+  for (int i = 0; i < samples; i++) {
+    int adcValue = analogRead(ntcPin);
+    float Vout = (adcValue * Vcc) / adcMax;
+    float R_ntc = (Vcc * R_fixed / Vout) - R_fixed;
+    float tempK = 1.0 / (1.0 / T0 + (1.0 / beta) * log(R_ntc / R0));
+    float tempC = tempK - 273.15 + calibrationOffset;
+    float tempF = tempC * 9.0 / 5.0 + 32.0;
+    total += tempF;
+    delay(10); // short delay between samples
+  }
+
+  int avgTempF = (int)(total / samples + 0.5); // round to nearest int
+  Serial.print("Avg Temp (F): ");
+  Serial.println(avgTempF);
+  return avgTempF;
+}
+
+
+// --- Function to draw temperature ---
+void drawTemperature(int tempF) {
+  char buffer[10];
+
+  snprintf(buffer, sizeof(buffer), "%d F", tempF);  // Integer with degree
+
+  display.setFont(&Orbitron_Medium_18);
+  display.setTextColor(WHITE);
+
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(buffer, 0, 0, &x1, &y1, &w, &h);
+  int textX = (SCREEN_WIDTH - w) / 2;
+  int textY = 39;
+
+  display.setCursor(textX, textY);
+  display.print(buffer);
+  display.setFont();  // Reset font
+  
+  
+}
+
+void drawDegreeSymbol2(int x, int y) {
+  display.setFont();             // Use default font for the degree symbol
+  display.setTextSize(1);        // Size 1 (default)
+  display.setTextColor(WHITE);  
+  display.setCursor(x, y);       
+  display.print('o');     // ASCII 247 (° Degree symbol)
+}
+
+void drawDegreeSymbol(int x, int y) {
+  display.setFont();             // Use default font for the degree symbol
+  display.setTextSize(1);        // Size 1 (default)
+  display.setTextColor(WHITE);  
+  display.setCursor(x, y);       
+  display.print('o');     // ASCII 247 (° Degree symbol)
+}
+
+
+// --- Function to draw set temperature ---
+void drawSetTemperature(int setTempF) {
+  char buffer[16];
+
+  snprintf(buffer, sizeof(buffer), "   %d F", setTempF);
+
+  display.setFont(&Orbitron_Medium_18);
+  display.setTextColor(WHITE);
+
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(buffer, 0, 0, &x1, &y1, &w, &h);
+
+  int textX = (110 - w) / 2;
+  int textY = 62;  // Adjusted below the actual temperature (which ends at y=39)
+
+  display.setCursor(textX, textY);
+  display.print(buffer);
+  display.setFont();  // Reset font after printing
+}
+// Cohffee mug Icon 
+void drawStandbyIcon() {
+  int iconX = 0;  // Left edge
+  int iconY = SCREEN_HEIGHT - IMAGE_HEIGHT;  // Bottom edge
+
+  display.drawBitmap(iconX, iconY, Coffee_Icons, IMAGE_WIDTH, IMAGE_HEIGHT, WHITE);
+}
+
+// draw Hazard ion
+void drawHazardIcon() {
+  int iconX = SCREEN_WIDTH - IMAGE_WIDTH ;       // Right side
+  int iconY = SCREEN_HEIGHT - IMAGE_HEIGHT;     // Bottom side
+
+  display.drawBitmap(iconX, iconY, Hazard_Icons, IMAGE_WIDTH, IMAGE_HEIGHT, WHITE);
+}
+
+
+
 void setup() {
   Serial.begin(115200);
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("SSD1306 allocation failed"));
-    for (;;);
+    while (true);
   }
+ 
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
 
   startTime = millis();
 }
 
 void loop() {
-  display.clearDisplay();
+  unsigned long currentMillis = millis();
 
-  // Draw Hello world
-  display.setTextSize(1);
-  display.setTextColor(WHITE);
-  // display.setCursor(0, 20);
-  // display.println("Hello, world!");
+  // Check if it's time to update temperature
+  if (currentMillis - lastTempUpdate >= tempUpdateInterval) {
+    int newTemp = readTemperatureF();
 
-  // Battery info
-  int batteryPercentage = 75; // Replace with actual sensor reading later
-  int batteryWidth = 16;
-  int batteryHeight = 8;
-  int x = SCREEN_WIDTH - batteryWidth - 4;
-  int y = 2;
+    if (newTemp != lastTempF) {
+      lastTempF = newTemp;
+    }
 
-  drawBatteryIcon(x, y, batteryWidth, batteryHeight, batteryPercentage);
+    lastTempUpdate = currentMillis;
+  }
 
-  // Runtime
-  drawRuntime(0, 2, millis() - startTime);
+    display.clearDisplay();
+
+    // Battery
+    int batteryPercentage = 50;
+    int batteryWidth = 16;
+    int batteryHeight = 8;
+    int x = SCREEN_WIDTH - batteryWidth - 4;
+    int y = 2;
+    drawBatteryIcon(x, y, batteryWidth, batteryHeight, batteryPercentage);
+
+    // Runtime
+    drawRuntime(0, 2, millis() - startTime);
+
+    // Dotted line
+    for (int i = 0; i < SCREEN_WIDTH; i++) {
+      display.drawPixel(i, 15, WHITE);
+    }
+
+    // Temperature
+    drawTemperature(lastTempF);
+    drawDegreeSymbol(xPos, yPos);
+    drawDegreeSymbol2(xPos2, yPos2);
+
+
+   drawSetTemperature(135);         // Show set temp below it
+    drawStandbyIcon();              // Show Coffee Mug Icon
+    drawHazardIcon();              // Show Hazard  Icon 
+display.display();
   
-  // Draw dotted line across entire width to simulate grey line
-for (int i = 0; i < SCREEN_WIDTH; i += 1) {
-  display.drawPixel(i, 15, WHITE);  // Y=18 is below time and battery
-}
+   
 
-  display.display();
-  delay(1000); // Update every second
+  delay(500); // Smooth update
 }
