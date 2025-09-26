@@ -20,19 +20,42 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 unsigned long lastTempUpdate = 0;
 const unsigned long tempUpdateInterval = 5000;  // 5 seconds
 
-// New globle variables for Centered set temoerature
-#define BUTTON_PIN 21
+// New globle variables for Centered set temperature
+#define INC_BUTTON_PIN 6  // Increment button
+#define DEC_BUTTON_PIN 7  // Decrement button
+#define HEATER_PIN 10       // Heater pin
 bool showCenterSetTemp = false;
 unsigned long centerTempStartTime = 0;
 const unsigned long centerTempDuration = 5000; // 5 seconds
-const int setTempF = 135;
 
 
+
+
+//new globle variable for Battery percentage//------
+const int batteryPin = 1;      // ADC pin where divider is connected
+const float maxBatteryVoltage = 8.05;  // Fully charged
+const float minBatteryVoltage = 5.5;  // Consider empty around 6.0V (adjust if needed)
+
+
+
+// temperature Handling// 
+int tempOptions[] = {115, 120, 130, 140, 150, 155};
+int tempCount = sizeof(tempOptions) / sizeof(tempOptions[0]);
+int setTempIndex = 2; // Start at 130°F
+int setTempF = tempOptions[setTempIndex];
+
+bool waitingForSecondPress = true;
+
+
+// Forward declaration so loop() can call it
+void handleSetTempButton(bool increment);
+bool checkBatteryAndHeater(int batteryPercentage);
+int readBatteryPercentage();
 // Time tracking
 unsigned long startTime;
 
 // --- NTC Thermistor Configuration ---
-const int ntcPin = 0;            // ADC1 channel (GPIO0)
+const int ntcPin = 3;            // ADC1 channel (GPIO0)
 const float Vcc = 3.3;
 const int adcMax = 4095;
 const float R_fixed = 100000.0;  // 100kΩ
@@ -137,7 +160,7 @@ void drawDegreeSymbol(int x, int y) {
 void drawSetTemperature(int setTempF) {
   char buffer[16];
 
-  snprintf(buffer, sizeof(buffer), "   %d F", setTempF);
+  snprintf(buffer, sizeof(buffer), "   %d  F", setTempF);
 
   display.setFont(&Orbitron_Medium_10);
   display.setTextColor(WHITE);
@@ -192,7 +215,13 @@ void drawHazardIcon() {
 
 void setup() {
   Serial.begin(115200);
-  pinMode(BUTTON_PIN, INPUT_PULLUP); 
+  pinMode(HEATER_PIN, OUTPUT);
+  digitalWrite(HEATER_PIN, LOW); // Ensure heater is OFF at startup
+  pinMode(INC_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(DEC_BUTTON_PIN, INPUT_PULLUP); 
+  // Initialize I2C with custom SDA and SCL pins
+  Wire.begin(18, 19);   // SDA = 18, SCL = 19
+
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("SSD1306 allocation failed"));
     while (true);
@@ -214,47 +243,148 @@ void loop() {
     if (newTemp != lastTempF) {
       lastTempF = newTemp;
     }
-
     lastTempUpdate = currentMillis;
   }
-// Button is pressed when logic is LOW
-if (digitalRead(BUTTON_PIN) == LOW && !showCenterSetTemp) {
-  showCenterSetTemp = true;
-  centerTempStartTime = currentMillis;
-}
+
+  // Handle button presses
+  if (digitalRead(INC_BUTTON_PIN) == LOW) {
+    handleSetTempButton(true); // Increment
+    // delay(0); // Debounce
+  }
+  if (digitalRead(DEC_BUTTON_PIN) == LOW) {
+    handleSetTempButton(false); // Decrement
+    // delay(0); // Debounce
+  }
 
   // Check if time to exit center display mode
   if (showCenterSetTemp && (currentMillis - centerTempStartTime >= centerTempDuration)) {
     showCenterSetTemp = false;
+    waitingForSecondPress = true; // Reset for next time
   }
-    display.clearDisplay();
 
-  if (showCenterSetTemp) {
-    // Only show centered Set Temp
-    drawCenteredSetTemperature(setTempF);
-  } else {
-    // Show full display
-    int batteryPercentage = 100;
-    int batteryWidth = 16;
-    int batteryHeight = 8;
-    int x = SCREEN_WIDTH - batteryWidth - 4;
-    int y = 2;
-    drawBatteryIcon(x, y, batteryWidth, batteryHeight, batteryPercentage);
-    drawRuntime(0, 2, millis() - startTime);
+  display.clearDisplay();
 
-    // for (int i = 0; i < SCREEN_WIDTH; i++) {
-    //   display.drawPixel(i, 15, WHITE);
-    // }
+  // --- Battery percentage simulation (replace with real read later)
+  int batteryPercentage = readBatteryPercentage();  
 
-    drawTemperature(lastTempF);
-    drawDegreeSymbol(xPos, yPos);
-    drawDegreeSymbol2(xPos2, yPos2);
-    drawSetTemperature(setTempF);
-    drawStandbyIcon();
-    drawHazardIcon();
+  //  First check battery condition
+  if (batteryPercentage <= 0) {
+    checkBatteryAndHeater(batteryPercentage);  
+  } 
+  else {
+    // Normal screen
+    if (showCenterSetTemp) {
+      // Only show centered Set Temp
+      drawCenteredSetTemperature(setTempF);
+    } else {
+      // Show full display
+      int batteryWidth = 15;
+      int batteryHeight = 8;
+      int x = SCREEN_WIDTH - batteryWidth - 4;
+      int y = 2;
+
+      drawBatteryIcon(x, y, batteryWidth, batteryHeight, batteryPercentage);
+      drawRuntime(0, 2, millis() - startTime);
+
+      drawTemperature(lastTempF);
+      drawDegreeSymbol(xPos, yPos);
+      drawDegreeSymbol2(xPos2, yPos2);
+      drawSetTemperature(setTempF);
+      drawStandbyIcon();
+      drawHazardIcon();
+    }
+
+    // Heater control
+    if (lastTempF <= setTempF - 3) {
+      digitalWrite(HEATER_PIN, HIGH); // Turn heater ON
+    } 
+    else if (lastTempF >= setTempF) {
+      digitalWrite(HEATER_PIN, LOW);  // Turn heater OFF
+    }
   }
 
   display.display();
-
   delay(500); // Smooth update
+}
+
+
+void handleSetTempButton(bool increment) {
+  unsigned long currentMillis = millis();
+  
+  if (!showCenterSetTemp) {
+    // First press → Show set temp only
+    showCenterSetTemp = true;
+    centerTempStartTime = currentMillis;
+    waitingForSecondPress = true;
+  } else {
+    if (waitingForSecondPress) {
+      // Second press → allow changes
+      waitingForSecondPress = false;
+    } else {
+      // Adjust temperature from list without wrap-around
+      if (increment) {
+        if (setTempIndex < tempCount - 1) {
+          setTempIndex++;
+        }
+      } else {
+        if (setTempIndex > 0) {
+          setTempIndex--;
+        }
+      }
+      setTempF = tempOptions[setTempIndex];
+    }
+    centerTempStartTime = currentMillis; // Reset timer
+  }
+}
+
+
+// Function to check battery status and act accordingly
+bool checkBatteryAndHeater(int batteryPercentage) {
+  if (batteryPercentage <= 5.5) {
+    // Turn OFF the heater
+    digitalWrite(HEATER_PIN, LOW);
+
+    // Display ONLY the warning message
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(30, 25);
+    display.println("BATTERY LOW");
+    display.setCursor(23, 40);
+    display.println("PLEASE CHARGE");
+    display.display();
+
+    return false; // Signal that normal screen should NOT be drawn
+  }
+  return true; // Battery OK → allow normal drawing
+}
+
+
+// Battery Percentage reading Function
+int readBatteryPercentage() {
+  const int samples = 5;  // number of samples to average
+  long total = 0;
+
+  // Take multiple readings
+  for (int i = 0; i < samples; i++) {
+    total += analogRead(batteryPin);
+    delay(2); // small delay between reads
+  }
+
+  // Average ADC value
+  int raw = total / samples;
+
+  // Convert ADC to actual battery voltage
+  float voltageADC = (raw / 4095.0) * 2.9;  // ESP32 ADC (12-bit, 0–3.3V)
+  float batteryVoltage = voltageADC * ((100.0 + 56.0) / 56.0); // Undo divider
+
+  // Map voltage to percentage
+  int percent = (int)((batteryVoltage - minBatteryVoltage) * 100.0 / 
+                     (maxBatteryVoltage - minBatteryVoltage));
+
+  // Clamp limits
+  if (percent > 100) percent = 100;
+  if (percent < 0) percent = 0;
+
+  return percent;
 }
