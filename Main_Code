@@ -20,7 +20,15 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 bool lastIncState = HIGH;
 bool lastDecState = HIGH;
 unsigned long decPressStart = 0;
+unsigned long incPressStart = 0;  // NEW: Track INC button long press
 const unsigned long longPressDuration = 2000; // 2 seconds
+const unsigned long incLongPressDuration = 2000; // NEW: 3 seconds for heater authorization
+
+// --- Heater authorization variables ---
+bool heaterAuthorized = false;  // NEW: Permission flag for heater
+bool showHeaterConfirm = false;  // NEW: Show confirmation screen
+unsigned long heaterConfirmStart = 0;  // NEW: Timer for confirmation window
+const unsigned long heaterConfirmDuration = 5000;  // NEW: 5 seconds
 
 // --- Double press detection variables ---
 static unsigned long lastButtonPressTime = 0;
@@ -175,6 +183,41 @@ void drawCenteredSetTemperature(int temp) {
   display.setFont();  
 }
 
+// NEW: Draw heater authorization confirmation screen
+void drawHeaterConfirmation() {
+  // Center text: "Turn HEATER ON ?"
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  
+  const char* line1 = "Turn HEATER";
+  const char* line2 = "ON/OFF ?";
+  
+  int16_t x1, y1;
+  uint16_t w1, h1, w2, h2;
+  display.getTextBounds(line1, 0, 0, &x1, &y1, &w1, &h1);
+  display.getTextBounds(line2, 0, 0, &x1, &y1, &w2, &h2);
+  
+  int textX1 = (SCREEN_WIDTH - w1) / 2;
+  int textX2 = (SCREEN_WIDTH - w2) / 2;
+  int textY1 = 20;
+  int textY2 = 35;
+  
+  display.setCursor(textX1, textY1);
+  display.print(line1);
+  display.setCursor(textX2, textY2);
+  display.print(line2);
+  
+  // Bottom left: "No"
+  display.setCursor(5, SCREEN_HEIGHT - 10);
+  display.print("OFF");
+  
+  // Bottom right: "Yes"
+  const char* yesText = "ON";
+  display.getTextBounds(yesText, 0, 0, &x1, &y1, &w1, &h1);
+  display.setCursor(SCREEN_WIDTH - w1 - 5, SCREEN_HEIGHT - 10);
+  display.print(yesText);
+}
+
 void drawStandbyIcon() {
   int iconX = 0;  
   int iconY = SCREEN_HEIGHT - IMAGE_HEIGHT;  
@@ -218,89 +261,138 @@ void loop() {
   bool incState = digitalRead(INC_BUTTON_PIN);
   bool decState = digitalRead(DEC_BUTTON_PIN);
 
-  // Increment button: single press only
+  // === NEW: Handle heater confirmation screen ===
+  if (showHeaterConfirm) {
+    // Check if INC button pressed (YES)
+    if (lastIncState == HIGH && incState == LOW) {
+      heaterAuthorized = true;
+      showHeaterConfirm = false;
+      lastIncState = incState;
+      lastDecState = decState;
+      
+      // Draw confirmation screen and return
+      display.clearDisplay();
+      drawHeaterConfirmation();
+      display.display();
+      return;
+    }
+    
+    // Check if DEC button pressed (NO/Cancel)
+    if (lastDecState == HIGH && decState == LOW) {
+      showHeaterConfirm = false;
+      lastIncState = incState;
+      lastDecState = decState;
+      
+      // Draw normal screen and return immediately to prevent further processing
+      display.clearDisplay();
+      int batteryPercentage = readBatteryPercentage();
+      int batteryWidth = 15;
+      int batteryHeight = 8;
+      int x = SCREEN_WIDTH - batteryWidth - 4;
+      int y = 2;
+      drawBatteryIcon(x, y, batteryWidth, batteryHeight, batteryPercentage);
+      drawRuntime(0, 2, millis() - startTime);
+      drawTemperature(lastTempF);
+      drawDegreeSymbol(xPos, yPos);
+      drawDegreeSymbol2(xPos2, yPos2);
+      drawSetTemperature(setTempF);
+      drawStandbyIcon();
+      drawHazardIcon();
+      display.display();
+      while(DEC_BUTTON_PIN == HIGH)
+      {
+
+      }
+      decPressStart = currentMillis;
+      heaterAuthorized = false;
+      return;
+    }
+    
+    // Check timeout (5 seconds)
+    if (currentMillis - heaterConfirmStart >= heaterConfirmDuration) {
+      showHeaterConfirm = false;
+    }
+    
+    lastIncState = incState;
+    lastDecState = decState;
+    
+    // Draw confirmation screen and return
+    display.clearDisplay();
+    drawHeaterConfirmation();
+    display.display();
+    return;
+  }
+
+  // === INC button handling ===
+  // Track long press for heater authorization (3 seconds)
   if (lastIncState == HIGH && incState == LOW) {
-    handleSetTempButton(true);
+    incPressStart = currentMillis;
+  } 
+  else if (lastIncState == LOW && incState == LOW) {
+    // Button still held down - check if 3 seconds passed
+    if (currentMillis - incPressStart >= incLongPressDuration) {
+      // Show heater confirmation screen
+      showHeaterConfirm = true;
+      heaterConfirmStart = currentMillis;
+      // Prevent retriggering
+      incPressStart = currentMillis + 10000;
+    }
+  }
+  else if (lastIncState == LOW && incState == HIGH) {
+    // Button released - check if it was a short press
+    if (currentMillis - incPressStart < incLongPressDuration) {
+      handleSetTempButton(true);  // Handle temperature increment
+    }
   }
   lastIncState = incState;
 
+  // === Double press detection for system ON/OFF ===
+  if ((lastIncState == LOW && incState == HIGH) || (lastDecState == LOW && decState == HIGH)) {
+    unsigned long now = millis();
 
+    if (now - lastButtonPressTime <= doublePressWindow) {
+      pressCount++;
+    } else {
+      pressCount = 1;
+    }
 
+    lastButtonPressTime = now;
 
-
-//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Detect rising edge (button released)
-if ((lastIncState == LOW && incState == HIGH) || (lastDecState == LOW && decState == HIGH)) {
-  unsigned long now = millis();
-
-  if (now - lastButtonPressTime <= doublePressWindow) {
-    pressCount++;
-  } else {
-    pressCount = 1; // reset if outside window
+    if (!SystemOn && pressCount == 2) {
+      SystemOn = true;
+      display.clearDisplay();
+      display.display();
+      display.ssd1306_command(SSD1306_DISPLAYON);
+      delay(10);
+      setTempF = temporaryF;
+      pressCount = 0;
+    }
   }
 
-  lastButtonPressTime = now;
-
-  // Double press detected
-  if (!SystemOn && pressCount == 2) {
-    // Turn OLED back ON
-    SystemOn = true;
-    display.clearDisplay();
-    display.display();
-    display.ssd1306_command(SSD1306_DISPLAYON);
-    delay(10);
-    setTempF = temporaryF;
-    // Reset press count so it doesn’t trigger again
-    pressCount = 0;
-  }
-}
-
-/////////////////////////////////////////////////////////////////////////////////////////////
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  // Decrement button: detect short vs long press
+  // === DEC button: detect short vs long press ===
   if (lastDecState == HIGH && decState == LOW) {
     decPressStart = currentMillis; 
   }
- else if (lastDecState == LOW && decState == LOW) {
-  if (currentMillis - decPressStart >= longPressDuration) {
-    temporaryF = setTempF;
-    SystemOn = false; // flag that system is off
-    setTempF = 0;
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(WHITE);
-    display.setCursor(30, 30);
-    display.println("Turning off");
-    display.display();
-    delay(1000);
+  else if (lastDecState == LOW && decState == LOW) {
+    if (currentMillis - decPressStart >= longPressDuration) {
+      temporaryF = setTempF;
+      SystemOn = false;
+      setTempF = 0;
+      heaterAuthorized = false;  // NEW: Reset authorization when system turns OFF
+      display.clearDisplay();
+      display.setTextSize(1);
+      display.setTextColor(WHITE);
+      display.setCursor(30, 30);
+      display.println("Turning off");
+      display.display();
+      delay(1000);
 
-    // Turn OLED OFF completely
-    display.ssd1306_command(SSD1306_DISPLAYOFF);
-    digitalWrite(HEATER_PIN, LOW);  // Turn heater OFF
+      display.ssd1306_command(SSD1306_DISPLAYOFF);
+      digitalWrite(HEATER_PIN, LOW);
 
-
-    // Prevent retriggering
-    decPressStart = currentMillis + 10000;
+      decPressStart = currentMillis + 10000;
+    }
   }
-}
-
   else if (lastDecState == LOW && decState == HIGH) {
     if (currentMillis - decPressStart < longPressDuration) {
       handleSetTempButton(false); 
@@ -336,10 +428,16 @@ if ((lastIncState == LOW && incState == HIGH) || (lastDecState == LOW && decStat
       drawStandbyIcon();
       drawHazardIcon();
     }
-    if (lastTempF <= setTempF - 3) {
-      digitalWrite(HEATER_PIN, HIGH); 
-    } else if (lastTempF >= setTempF) {
-      digitalWrite(HEATER_PIN, LOW);  
+    
+    // NEW: Heater only runs if authorized
+    if (heaterAuthorized) {
+      if (lastTempF <= setTempF - 3) {
+        digitalWrite(HEATER_PIN, HIGH); 
+      } else if (lastTempF >= setTempF) {
+        digitalWrite(HEATER_PIN, LOW);  
+      }
+    } else {
+      digitalWrite(HEATER_PIN, LOW);  // Keep OFF if not authorized
     }
   }
 
