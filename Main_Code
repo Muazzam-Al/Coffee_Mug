@@ -5,6 +5,13 @@
 #include <math.h>
 #include <Fonts/Orbitron_Medium_18.h>   // Your custom font
 #include <Fonts/Orbitron_Medium_10.h>   // for set temperature
+#include "esp_sleep.h"
+#include <EEPROM.h>
+ 
+ #define EEPROM_SIZE 64
+#define EEPROM_ADDR_SETTEMP 0
+
+bool isSleeping = false;
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -229,9 +236,58 @@ void drawHazardIcon() {
   int iconY = SCREEN_HEIGHT - IMAGE_HEIGHT;     
   display.drawBitmap(iconX, iconY, Hazard_Icons, IMAGE_WIDTH, IMAGE_HEIGHT, WHITE);
 }
+void wakeFromLightSleepMode() {
+  isSleeping = false;
+  Serial.println("Woke from Light Sleep!");
+
+  // Re-enable display, heater off for safety
+  display.ssd1306_command(SSD1306_DISPLAYON);
+  digitalWrite(HEATER_PIN, LOW);
+  SystemOn = true;
+  delay(300);
+}
+void enterLightSleepMode() {
+  Serial.println("Entering Light Sleep...");
+
+  // Enable wakeup on LOW for active-low buttons
+  esp_sleep_enable_gpio_wakeup();
+  gpio_wakeup_enable((gpio_num_t)DEC_BUTTON_PIN, GPIO_INTR_LOW_LEVEL);
+
+  delay(50);
+  Serial.flush();
+
+  isSleeping = true;
+  esp_light_sleep_start();  // device pauses here
+
+  // continues here after wake-up
+  wakeFromLightSleepMode();
+}
+
+
+// Save temperature setpoint val in EEPROM 
+void saveSetTempToEEPROM(int temp) {
+  static int lastSavedTemp = -1; // prevent redundant writes
+  if (temp != lastSavedTemp) {
+    EEPROM.write(EEPROM_ADDR_SETTEMP, temp);
+    EEPROM.commit();
+    lastSavedTemp = temp;
+    Serial.print("Saved setTempF = ");
+    Serial.println(temp);
+  }
+}
+
 
 void setup() {
   Serial.begin(115200);
+ EEPROM.begin(EEPROM_SIZE);
+
+  // Read last saved temperature setpoint
+  setTempF = EEPROM.read(EEPROM_ADDR_SETTEMP);
+  if (setTempF < 100 || setTempF > 160) {  // sanity check
+    setTempF = 130; // default value
+  }
+
+
   pinMode(HEATER_PIN, OUTPUT);
   digitalWrite(HEATER_PIN, LOW); 
   pinMode(INC_BUTTON_PIN, INPUT_PULLUP);
@@ -244,6 +300,12 @@ void setup() {
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
   startTime = millis();
+
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
+  wakeFromLightSleepMode();
+}
+
 }
 
 void loop() {
@@ -373,26 +435,26 @@ void loop() {
   if (lastDecState == HIGH && decState == LOW) {
     decPressStart = currentMillis; 
   }
-  else if (lastDecState == LOW && decState == LOW) {
-    if (currentMillis - decPressStart >= longPressDuration) {
-      temporaryF = setTempF;
-      SystemOn = false;
-      setTempF = 0;
-      heaterAuthorized = false;  // NEW: Reset authorization when system turns OFF
-      display.clearDisplay();
-      display.setTextSize(1);
-      display.setTextColor(WHITE);
-      display.setCursor(30, 30);
-      display.println("Turning off");
-      display.display();
-      delay(1000);
+    else if (lastDecState == LOW && decState == LOW) {
+      if (currentMillis - decPressStart >= longPressDuration) {
+        temporaryF = setTempF;
+        SystemOn = false;
+        setTempF = 0;
+        heaterAuthorized = false;  // NEW: Reset authorization when system turns OFF
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(WHITE);
+        display.setCursor(30, 30);
+        display.println("Turning off");
+        display.display();
+        delay(1000);
 
-      display.ssd1306_command(SSD1306_DISPLAYOFF);
-      digitalWrite(HEATER_PIN, LOW);
-
-      decPressStart = currentMillis + 10000;
+        display.ssd1306_command(SSD1306_DISPLAYOFF);
+        digitalWrite(HEATER_PIN, LOW);
+        
+         enterLightSleepMode();  
+      }
     }
-  }
   else if (lastDecState == LOW && decState == HIGH) {
     if (currentMillis - decPressStart < longPressDuration) {
       handleSetTempButton(false); 
@@ -430,15 +492,23 @@ void loop() {
     }
     
     // NEW: Heater only runs if authorized
-    if (heaterAuthorized) {
-      if (lastTempF <= setTempF - 3) {
-        digitalWrite(HEATER_PIN, HIGH); 
-      } else if (lastTempF >= setTempF) {
-        digitalWrite(HEATER_PIN, LOW);  
-      }
-    } else {
-      digitalWrite(HEATER_PIN, LOW);  // Keep OFF if not authorized
-    }
+   // --- Heater control logic ---
+if (heaterAuthorized) {
+  if (lastTempF < 100) {
+    // Safety: do NOT heat if below 100°F
+    digitalWrite(HEATER_PIN, LOW);
+  } 
+  else if (lastTempF <= setTempF - 3) {
+    digitalWrite(HEATER_PIN, HIGH);
+  } 
+  else if (lastTempF >= setTempF) {
+    digitalWrite(HEATER_PIN, LOW);
+  }
+} 
+else {
+  digitalWrite(HEATER_PIN, LOW);  // Keep OFF if not authorized
+}
+
   }
 
   display.display();
@@ -465,6 +535,8 @@ void handleSetTempButton(bool increment) {
         }
       }
       setTempF = tempOptions[setTempIndex];
+      saveSetTempToEEPROM(setTempF);
+
     }
     centerTempStartTime = currentMillis;
   }
