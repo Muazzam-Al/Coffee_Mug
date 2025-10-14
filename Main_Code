@@ -245,7 +245,14 @@ void wakeFromLightSleepMode() {
   digitalWrite(HEATER_PIN, LOW);
   SystemOn = true;
   delay(300);
+
+  // ✅ Reload the set temperature from EEPROM after wake
+  setTempF = EEPROM.read(EEPROM_ADDR_SETTEMP);
+  if (setTempF < 100 || setTempF > 160) {
+    setTempF = 130; // sanity fallback
+  }
 }
+
 void enterLightSleepMode() {
   Serial.println("Entering Light Sleep...");
 
