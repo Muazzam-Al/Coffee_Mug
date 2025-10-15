@@ -239,7 +239,7 @@ void drawHazardIcon() {
 void wakeFromLightSleepMode() {
   isSleeping = false;
   Serial.println("Woke from Light Sleep!");
-
+  startTime = millis();  
   // Re-enable display, heater off for safety
   display.ssd1306_command(SSD1306_DISPLAYON);
   digitalWrite(HEATER_PIN, LOW);
