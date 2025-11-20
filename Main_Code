@@ -1,3 +1,4 @@
+
 #include "icons.h"
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -48,9 +49,11 @@ unsigned long lastTempUpdate = 0;
 const unsigned long tempUpdateInterval = 5000;  // 5 seconds
 
 // Pins
-#define INC_BUTTON_PIN 6  
-#define DEC_BUTTON_PIN 7  
-#define HEATER_PIN 10     
+#define INC_BUTTON_PIN 4  
+#define DEC_BUTTON_PIN 5  
+#define HEATER_PIN 10  
+#define Display_Power 6
+
 
 // Center temperature display
 bool showCenterSetTemp = false;
@@ -286,6 +289,8 @@ void saveSetTempToEEPROM(int temp) {
 
 void setup() {
   Serial.begin(115200);
+  pinMode(Display_Power,OUTPUT);// Set as output
+  digitalWrite(Display_Power, HIGH);
  EEPROM.begin(EEPROM_SIZE);
 
   // Read last saved temperature setpoint
