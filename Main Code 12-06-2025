@@ -1,0 +1,615 @@
+//Updated with Hazard icon blinking
+
+#include "icons.h"
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <math.h>
+#include <Fonts/Orbitron_Medium_18.h>   // Your custom font
+#include <Fonts/Orbitron_Medium_10.h>   // for set temperature
+#include "esp_sleep.h"
+#include <EEPROM.h>
+ 
+ #define EEPROM_SIZE 64
+#define EEPROM_ADDR_SETTEMP 0
+
+bool isSleeping = false;
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+int xPos = 70;   
+int yPos = 17;   
+int xPos2 = 65;  
+int yPos2 = 50;  
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// --- New variables for button handling ---
+bool lastIncState = HIGH;
+bool lastDecState = HIGH;
+unsigned long decPressStart = 0;
+unsigned long incPressStart = 0;  // NEW: Track INC button long press
+const unsigned long longPressDuration = 2000; // 2 seconds
+const unsigned long incLongPressDuration = 2000; // NEW: 3 seconds for heater authorization
+
+// --- Heater authorization variables ---
+bool heaterAuthorized = false;  // NEW: Permission flag for heater
+bool showHeaterConfirm = false;  // NEW: Show confirmation screen
+unsigned long heaterConfirmStart = 0;  // NEW: Timer for confirmation window
+const unsigned long heaterConfirmDuration = 5000;  // NEW: 5 seconds
+
+// --- Double press detection variables ---
+static unsigned long lastButtonPressTime = 0;
+static int pressCount = 0;
+const unsigned long doublePressWindow = 1000; // 1 second
+bool SystemOn = true;
+
+// Timing
+unsigned long lastTempUpdate = 0;
+const unsigned long tempUpdateInterval = 5000;  // 5 seconds
+
+// Pins
+#define INC_BUTTON_PIN 6  
+#define DEC_BUTTON_PIN 7  
+#define HEATER_PIN 10  
+// #define Display_Power 6
+
+
+// Center temperature display
+bool showCenterSetTemp = false;
+unsigned long centerTempStartTime = 0;
+const unsigned long centerTempDuration = 5000; // 5 seconds
+
+// Battery
+const int batteryPin = 1;      
+const float maxBatteryVoltage = 8.05;  
+const float minBatteryVoltage = 5.5;   
+
+// Temperature handling
+int tempOptions[] = {115, 120, 130, 140, 150, 155};
+int tempCount = sizeof(tempOptions) / sizeof(tempOptions[0]);
+int setTempIndex = 2; 
+int setTempF = tempOptions[setTempIndex];
+
+bool waitingForSecondPress = true;
+
+int temporaryF;
+
+// Forward declarations
+void handleSetTempButton(bool increment);
+bool checkBatteryAndHeater(int batteryPercentage);
+int readBatteryPercentage();
+
+// Time trackingF
+unsigned long startTime;
+
+// NTC config
+const int ntcPin = 3;            
+const float Vcc = 3.3;
+const int adcMax = 4095;
+const float R_fixed = 100000.0;  
+const float beta = 3950.0;
+const float T0 = 298.15;         
+const float R0 = 100000.0;       
+const float calibrationOffset = -5;
+
+int lastTempF = 0;  
+
+
+// --- Drawing functions (unchanged) ---
+void drawBatteryIcon(int x, int y, int width, int height, int percentage) {
+  display.drawRect(x, y, width, height, WHITE);
+  int terminalWidth = 2;
+  int terminalHeight = height / 2;
+  display.drawRect(x + width, y + (height - terminalHeight) / 2, terminalWidth, terminalHeight, WHITE);
+
+  int innerPadding = 1;
+  int fillWidth = (percentage * (width - 2 * innerPadding)) / 100;
+  display.fillRect(x + innerPadding, y + innerPadding, fillWidth, height - 2 * innerPadding, WHITE);
+}
+
+void drawRuntime(int x, int y, unsigned long elapsedMillis) {
+  int totalMinutes = elapsedMillis / 60000;
+  int hours = totalMinutes / 60;
+  int minutes = totalMinutes % 60;
+
+  char buffer[6];
+  snprintf(buffer, sizeof(buffer), "%02d:%02d", hours, minutes);
+
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(x, y);
+  display.print(buffer);
+}
+
+int readTemperatureF() {
+  const int samples = 5;
+  float total = 0;
+  for (int i = 0; i < samples; i++) {
+    int adcValue = analogRead(ntcPin);
+    float Vout = (adcValue * Vcc) / adcMax;
+    float R_ntc = (Vcc * R_fixed / Vout) - R_fixed;
+    float tempK = 1.0 / (1.0 / T0 + (1.0 / beta) * log(R_ntc / R0));
+    float tempC = tempK - 273.15 + calibrationOffset;
+    float tempF = tempC * 9.0 / 5.0 + 32.0;
+    total += tempF;
+    delay(10); 
+  }
+  int avgTempF = (int)(total / samples + 0.5); 
+  return avgTempF;
+}
+
+void drawTemperature(int tempF) {
+  char buffer[10];
+  snprintf(buffer, sizeof(buffer), "%d F", tempF);  
+  display.setFont(&Orbitron_Medium_18);
+  display.setTextColor(WHITE);
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(buffer, 0, 0, &x1, &y1, &w, &h);
+  int textX = (SCREEN_WIDTH - w) / 2;
+  int textY = 39;
+  display.setCursor(textX, textY);
+  display.print(buffer);
+  display.setFont();  
+}
+
+void drawDegreeSymbol2(int x, int y) {
+  display.setFont(); display.setTextSize(1); display.setTextColor(WHITE);  
+  display.setCursor(x, y); display.print('.');     
+}
+
+void drawDegreeSymbol(int x, int y) {
+  display.setFont(); display.setTextSize(1); display.setTextColor(WHITE);  
+  display.setCursor(x, y); display.print('o');     
+}
+
+void drawSetTemperature(int setTempF) {
+  char buffer[16];
+  snprintf(buffer, sizeof(buffer), "   %d  F", setTempF);
+  display.setFont(&Orbitron_Medium_10);
+  display.setTextColor(WHITE);
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(buffer, 0, 0, &x1, &y1, &w, &h);
+  int textX = (110 - w) / 2;
+  int textY = 62;  
+  display.setCursor(textX, textY);
+  display.print(buffer);
+  display.setFont();  
+}
+
+void drawCenteredSetTemperature(int temp) {
+  char buffer[10];
+  snprintf(buffer, sizeof(buffer), "%d F", temp);
+  display.setFont(&Orbitron_Medium_18);
+  display.setTextColor(WHITE);
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(buffer, 0, 0, &x1, &y1, &w, &h);
+  int textX = (SCREEN_WIDTH - w) / 2;
+  int textY = (SCREEN_HEIGHT + h) / 2;
+  display.setCursor(textX, textY);
+  display.print(buffer);
+  display.setFont();  
+}
+
+// NEW: Draw heater authorization confirmation screen
+void drawHeaterConfirmation() {
+  // Center text: "Turn HEATER ON ?"
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  
+  const char* line1 = "Turn HEATER";
+  const char* line2 = "ON/OFF ?";
+  
+  int16_t x1, y1;
+  uint16_t w1, h1, w2, h2;
+  display.getTextBounds(line1, 0, 0, &x1, &y1, &w1, &h1);
+  display.getTextBounds(line2, 0, 0, &x1, &y1, &w2, &h2);
+  
+  int textX1 = (SCREEN_WIDTH - w1) / 2;
+  int textX2 = (SCREEN_WIDTH - w2) / 2;
+  int textY1 = 20;
+  int textY2 = 35;
+  
+  display.setCursor(textX1, textY1);
+  display.print(line1);
+  display.setCursor(textX2, textY2);
+  display.print(line2);
+  
+  // Bottom left: "No"
+  display.setCursor(5, SCREEN_HEIGHT - 10);
+  display.print("OFF");
+  
+  // Bottom right: "Yes"
+  const char* yesText = "ON";
+  display.getTextBounds(yesText, 0, 0, &x1, &y1, &w1, &h1);
+  display.setCursor(SCREEN_WIDTH - w1 - 5, SCREEN_HEIGHT - 10);
+  display.print(yesText);
+}
+
+void drawStandbyIcon() {
+  int iconX = 0;  
+  int iconY = SCREEN_HEIGHT - IMAGE_HEIGHT;  
+  display.drawBitmap(iconX, iconY, Coffee_Icons, IMAGE_WIDTH, IMAGE_HEIGHT, WHITE);
+}
+
+void drawHazardIcon() {
+  int iconX = SCREEN_WIDTH - IMAGE_WIDTH ;       
+  int iconY = SCREEN_HEIGHT - IMAGE_HEIGHT;     
+  display.drawBitmap(iconX, iconY, Hazard_Icons, IMAGE_WIDTH, IMAGE_HEIGHT, WHITE);
+}
+void wakeFromLightSleepMode() {
+  isSleeping = false;
+  Serial.println("Woke from Light Sleep!");
+  startTime = millis();  
+  // Re-enable display, heater off for safety
+  display.ssd1306_command(SSD1306_DISPLAYON);
+  digitalWrite(HEATER_PIN, LOW);
+  SystemOn = true;
+  delay(300);
+
+  // ✅ Reload the set temperature from EEPROM after wake
+  setTempF = EEPROM.read(EEPROM_ADDR_SETTEMP);
+  if (setTempF < 100 || setTempF > 160) {
+    setTempF = 130; // sanity fallback
+  }
+}
+
+void enterLightSleepMode() {
+  Serial.println("Entering Light Sleep...");
+
+  // Enable wakeup on LOW for active-low buttons
+  esp_sleep_enable_gpio_wakeup();
+  gpio_wakeup_enable((gpio_num_t)DEC_BUTTON_PIN, GPIO_INTR_LOW_LEVEL);
+
+  delay(50);
+  Serial.flush();
+
+  isSleeping = true;
+  esp_light_sleep_start();  // device pauses here
+
+  // continues here after wake-up
+  wakeFromLightSleepMode();
+}
+
+
+// Save temperature setpoint val in EEPROM 
+void saveSetTempToEEPROM(int temp) {
+  static int lastSavedTemp = -1; // prevent redundant writes
+  if (temp != lastSavedTemp) {
+    EEPROM.write(EEPROM_ADDR_SETTEMP, temp);
+    EEPROM.commit();
+    lastSavedTemp = temp;
+    Serial.print("Saved setTempF = ");
+    Serial.println(temp);
+  }
+}
+
+void blinkHazardIcon() {
+  static unsigned long lastToggleTime = 0;
+  static bool isVisible = false;
+
+  if (digitalRead(HEATER_PIN) == HIGH) {
+    // Heater is ON - blink the icon
+    unsigned long currentMillis = millis();
+
+    if (currentMillis - lastToggleTime >= 300) {
+      lastToggleTime = currentMillis;
+      isVisible = !isVisible;
+    }
+
+    if (isVisible) {
+      drawHazardIcon();  // Show icon
+    }
+    // When not visible, do nothing (icon stays cleared)
+  } else {
+    // Heater is OFF - show static icon
+    drawHazardIcon();
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  // pinMode(Display_Power,OUTPUT);// Set as output
+  // digitalWrite(Display_Power, HIGH);
+ EEPROM.begin(EEPROM_SIZE);
+
+  // Read last saved temperature setpoint
+  setTempF = EEPROM.read(EEPROM_ADDR_SETTEMP);
+  if (setTempF < 100 || setTempF > 160) {  // sanity check
+    setTempF = 130; // default value
+  }
+
+
+  pinMode(HEATER_PIN, OUTPUT);
+  digitalWrite(HEATER_PIN, LOW); 
+  pinMode(INC_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(DEC_BUTTON_PIN, INPUT_PULLUP); 
+  Wire.begin(18, 19);   
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    while (true);
+  }
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+  startTime = millis();
+
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
+  wakeFromLightSleepMode();
+}
+
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - lastTempUpdate >= tempUpdateInterval) {
+    int newTemp = readTemperatureF();
+    if (newTemp != lastTempF) {
+      lastTempF = newTemp;
+    }
+    lastTempUpdate = currentMillis;
+  }
+
+
+
+  // --- Button handling ---
+  bool incState = digitalRead(INC_BUTTON_PIN);
+  bool decState = digitalRead(DEC_BUTTON_PIN);
+
+  // === NEW: Handle heater confirmation screen ===
+  if (showHeaterConfirm) {
+    // Check if INC button pressed (YES)
+    if (lastIncState == HIGH && incState == LOW) {
+      heaterAuthorized = true;
+      showHeaterConfirm = false;
+      lastIncState = incState;
+      lastDecState = decState;
+      
+      // Draw confirmation screen and return
+      display.clearDisplay();
+      drawHeaterConfirmation();
+      display.display();
+      return;
+    }
+    
+    // Check if DEC button pressed (NO/Cancel)
+    if (lastDecState == HIGH && decState == LOW) {
+      showHeaterConfirm = false;
+      lastIncState = incState;
+      lastDecState = decState;
+      
+      // Draw normal screen and return immediately to prevent further processing
+      display.clearDisplay();
+      int batteryPercentage = readBatteryPercentage();
+      int batteryWidth = 15;
+      int batteryHeight = 8;
+      int x = SCREEN_WIDTH - batteryWidth - 4;
+      int y = 2;
+      drawBatteryIcon(x, y, batteryWidth, batteryHeight, batteryPercentage);
+      drawRuntime(0, 2, millis() - startTime);
+      drawTemperature(lastTempF);
+      drawDegreeSymbol(xPos, yPos);
+      drawDegreeSymbol2(xPos2, yPos2);
+      drawSetTemperature(setTempF);
+      drawStandbyIcon();
+
+      display.display();
+      while(DEC_BUTTON_PIN == HIGH)
+      {
+
+      }
+      decPressStart = currentMillis;
+      heaterAuthorized = false;
+      return;
+    }
+    
+    // Check timeout (5 seconds)
+    if (currentMillis - heaterConfirmStart >= heaterConfirmDuration) {
+      showHeaterConfirm = false;
+    }
+    
+    lastIncState = incState;
+    lastDecState = decState;
+    
+    // Draw confirmation screen and return
+    display.clearDisplay();
+    drawHeaterConfirmation();
+    display.display();
+    return;
+  }
+
+blinkHazardIcon();
+  // === INC button handling ===
+  // Track long press for heater authorization (3 seconds)
+  if (lastIncState == HIGH && incState == LOW) {
+    incPressStart = currentMillis;
+  } 
+  else if (lastIncState == LOW && incState == LOW) {
+    // Button still held down - check if 3 seconds passed
+    if (currentMillis - incPressStart >= incLongPressDuration) {
+      // Show heater confirmation screen
+      showHeaterConfirm = true;
+      heaterConfirmStart = currentMillis;
+      // Prevent retriggering
+      incPressStart = currentMillis + 10000;
+    }
+  }
+  else if (lastIncState == LOW && incState == HIGH) {
+    // Button released - check if it was a short press
+    if (currentMillis - incPressStart < incLongPressDuration) {
+      handleSetTempButton(true);  // Handle temperature increment
+    }
+  }
+  lastIncState = incState;
+
+  // === Double press detection for system ON/OFF ===
+  if ((lastIncState == LOW && incState == HIGH) || (lastDecState == LOW && decState == HIGH)) {
+    unsigned long now = millis();
+
+    if (now - lastButtonPressTime <= doublePressWindow) {
+      pressCount++;
+    } else {
+      pressCount = 1;
+    }
+
+    lastButtonPressTime = now;
+
+    if (!SystemOn && pressCount == 2) {
+      SystemOn = true;
+      display.clearDisplay();
+      display.display();
+      display.ssd1306_command(SSD1306_DISPLAYON);
+      delay(10);
+      setTempF = temporaryF;
+      pressCount = 0;
+    }
+  }
+
+  // === DEC button: detect short vs long press ===
+  if (lastDecState == HIGH && decState == LOW) {
+    decPressStart = currentMillis; 
+  }
+    else if (lastDecState == LOW && decState == LOW) {
+      if (currentMillis - decPressStart >= longPressDuration) {
+        temporaryF = setTempF;
+        SystemOn = false;
+        setTempF = 0;
+        heaterAuthorized = false;  // NEW: Reset authorization when system turns OFF
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(WHITE);
+        display.setCursor(30, 30);
+        display.println("Turning off");
+        display.display();
+        delay(1000);
+
+        display.ssd1306_command(SSD1306_DISPLAYOFF);
+        digitalWrite(HEATER_PIN, LOW);
+        
+         enterLightSleepMode();  
+      }
+    }
+  else if (lastDecState == LOW && decState == HIGH) {
+    if (currentMillis - decPressStart < longPressDuration) {
+      handleSetTempButton(false); 
+    }
+  }
+  lastDecState = decState;
+
+  // --- Display + heater control ---
+  if (showCenterSetTemp && (currentMillis - centerTempStartTime >= centerTempDuration)) {
+    showCenterSetTemp = false;
+    waitingForSecondPress = true;
+  }
+
+  display.clearDisplay();
+
+  int batteryPercentage = readBatteryPercentage();  
+  if (batteryPercentage <= 0) {
+    checkBatteryAndHeater(batteryPercentage);  
+  } else {
+    if (showCenterSetTemp) {
+      drawCenteredSetTemperature(setTempF);
+    } else {
+      int batteryWidth = 15;
+      int batteryHeight = 8;
+      int x = SCREEN_WIDTH - batteryWidth - 4;
+      int y = 2;
+      drawBatteryIcon(x, y, batteryWidth, batteryHeight, batteryPercentage);
+      drawRuntime(0, 2, millis() - startTime);
+      drawTemperature(lastTempF);
+      drawDegreeSymbol(xPos, yPos);
+      drawDegreeSymbol2(xPos2, yPos2);
+      drawSetTemperature(setTempF);
+      drawStandbyIcon();
+    }
+    
+    // NEW: Heater only runs if authorized
+   // --- Heater control logic ---
+if (heaterAuthorized) {
+  if (lastTempF < 100) {
+    // Safety: do NOT heat if below 100°F
+    digitalWrite(HEATER_PIN, LOW);
+  } 
+  else if (lastTempF <= setTempF - 3) {
+    digitalWrite(HEATER_PIN, HIGH);
+  } 
+  else if (lastTempF >= setTempF) {
+    digitalWrite(HEATER_PIN, LOW);
+  }
+} 
+else {
+  digitalWrite(HEATER_PIN, LOW);  // Keep OFF if not authorized
+}
+
+  }
+ blinkHazardIcon();
+  display.display();
+  delay(2); 
+}
+
+void handleSetTempButton(bool increment) {
+  unsigned long currentMillis = millis();
+  if (!showCenterSetTemp) {
+    showCenterSetTemp = true;
+    centerTempStartTime = currentMillis;
+    waitingForSecondPress = true;
+  } else {
+    if (waitingForSecondPress) {
+      waitingForSecondPress = false;
+    } else {
+      if (increment) {
+        if (setTempIndex < tempCount - 1) {
+          setTempIndex++;
+        }
+      } else {
+        if (setTempIndex > 0) {
+          setTempIndex--;
+        }
+      }
+      setTempF = tempOptions[setTempIndex];
+      saveSetTempToEEPROM(setTempF);
+
+    }
+    centerTempStartTime = currentMillis;
+  }
+}
+
+bool checkBatteryAndHeater(int batteryPercentage) { //There 1
+  if (batteryPercentage <= 5.5) {
+    digitalWrite(HEATER_PIN, LOW); //1
+   heaterAuthorized = false;
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(30, 25);
+    display.println("BATTERY LOW");
+    display.setCursor(23, 40);
+    display.println("PLEASE CHARGE");
+    display.display();
+    return false;
+  }
+  return true;
+}
+
+int readBatteryPercentage() {
+  const int samples = 5;  
+  long total = 0;
+  for (int i = 0; i < samples; i++) {
+    total += analogRead(batteryPin);
+    delay(2); 
+  }
+  int raw = total / samples;
+  float voltageADC = (raw / 4095.0) * 2.9;  
+  float batteryVoltage = voltageADC * ((100.0 + 56.0) / 56.0); 
+  int percent = (int)((batteryVoltage - minBatteryVoltage) * 100.0 / 
+                     (maxBatteryVoltage - minBatteryVoltage));
+  if (percent > 100) percent = 100;
+  if (percent < 0) percent = 0;
+  return percent;
+}
